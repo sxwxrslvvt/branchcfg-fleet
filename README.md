@@ -178,3 +178,7 @@ config.example.yaml
 - [MikroTik: Address-lists](https://help.mikrotik.com/docs/spaces/ROS/pages/130220135/Address-lists)
 - [Python: ipaddress](https://docs.python.org/3/library/ipaddress.html)
 - [Jinja: StrictUndefined](https://jinja.palletsprojects.com/en/stable/api/)
+
+## Лицензия
+
+MIT — см. [LICENSE](LICENSE).
