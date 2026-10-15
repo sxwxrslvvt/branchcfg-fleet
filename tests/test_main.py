@@ -95,6 +95,62 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(process(config, output, check=True), 2)
             self.assertTrue(orphan.exists())
 
+    def test_stale_files_block_generation_without_partial_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            config = ROOT / "config.example.yaml"
+            # Первичная корректная генерация
+            self.assertEqual(process(config, output, check=False), 0)
+
+            # Создаем устаревший .rsc в sites и hub
+            stale_site = output / "sites" / "branch-stale.rsc"
+            stale_site.write_text("stale-site\n", encoding="utf-8")
+            stale_hub = output / "hub" / "old-hub.rsc"
+            stale_hub.write_text("stale-hub\n", encoding="utf-8")
+
+            # Изменяем один из существующих файлов, чтобы проверить отсутствие частичной записи
+            target = output / "sites" / "branch-001.rsc"
+            marker = "# custom edit before generate\n"
+            target.write_text(marker, encoding="utf-8")
+
+            # generate должен обнаружить устаревшие файлы и вернуть код 2
+            self.assertEqual(process(config, output, check=False), 2)
+
+            # Устаревшие файлы не должны быть удалены автоматически
+            self.assertTrue(stale_site.exists())
+            self.assertEqual(stale_site.read_text(encoding="utf-8"), "stale-site\n")
+            self.assertTrue(stale_hub.exists())
+            self.assertEqual(stale_hub.read_text(encoding="utf-8"), "stale-hub\n")
+
+            # Изменённый файл не должен быть перезаписан (частичная запись заблокирована)
+            self.assertEqual(target.read_text(encoding="utf-8"), marker)
+
+    def test_service_policy_overlap_with_other_branch_lan(self) -> None:
+        yaml_content = """
+version: 1
+policies:
+  pos:
+    - 10.200.10.0/24
+  office:
+    - 10.21.1.0/24
+sites:
+  - id: branch-001
+    lan: 10.21.1.0/24
+    profiles: [pos]
+  - id: branch-002
+    lan: 10.21.2.0/24
+    profiles: [office]
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self.write_config(Path(directory), yaml_content)
+            # branch-001 назначен только профиль 'pos', но профиль 'office' содержит сеть 10.21.1.0/24
+            with self.assertRaises(ConfigError) as ctx:
+                load_inventory(cfg)
+            error_message = str(ctx.exception)
+            self.assertIn("branch-001", error_message)
+            self.assertIn("10.21.1.0/24", error_message)
+            self.assertIn("office", error_message)
+
     def test_output_symlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -117,6 +173,9 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(main(["check", "--config", str(bad)]), 1)
             with self.assertRaises(ConfigError):
                 load_inventory(Path(directory) / "missing.yaml")
+            empty = self.write_config(Path(directory), "")
+            with self.assertRaises(ConfigError):
+                load_inventory(empty)
 
 
 if __name__ == "__main__":

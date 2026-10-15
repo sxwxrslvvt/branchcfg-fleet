@@ -163,13 +163,19 @@ def load_inventory(path: Path) -> Inventory:
     for first_index, first in enumerate(sites):
         for second in sites[first_index + 1 :]:
             if first.lan.overlaps(second.lan):
-                raise ConfigError(f"Пересечение LAN: {first.site_id} и {second.site_id}")
-        for profile in first.profiles:
-            for allowed_network in policies[profile]:
-                if first.lan.overlaps(allowed_network):
+                raise ConfigError(
+                    f"Пересечение LAN: филиалы {first.site_id} ({first.lan}) и {second.site_id} ({second.lan})"
+                )
+
+    # Профили описывают исключительно сервисные сети. Сеть любого сервисного профиля
+    # не должна пересекаться с LAN любого филиала, независимо от назначения профиля.
+    for site in sites:
+        for profile_name, profile_networks in policies.items():
+            for service_net in profile_networks:
+                if site.lan.overlaps(service_net):
                     raise ConfigError(
-                        f"{first.site_id}: LAN пересекается с разрешённой сетью "
-                        f"из профиля {profile} ({allowed_network})"
+                        f"Пересечение сети: LAN филиала {site.site_id} ({site.lan}) "
+                        f"пересекается с сетью {service_net} из профиля {profile_name}"
                     )
 
     return Inventory(sites=tuple(sorted(sites, key=lambda site: site.site_id)), policies=policies)
@@ -249,8 +255,8 @@ def show_diff(path: Path, current: str | None, expected: str) -> None:
     delta = difflib.unified_diff(
         (current or "").splitlines(keepends=True),
         expected.splitlines(keepends=True),
-        fromfile=f"current/{path}",
-        tofile=f"expected/{path}",
+        fromfile=f"current/{path.as_posix()}",
+        tofile=f"expected/{path.as_posix()}",
     )
     sys.stdout.writelines(delta)
 
@@ -287,26 +293,36 @@ def process(inventory_path: Path, output_dir: Path, check: bool, diff: bool = Fa
         if directory.exists() and not directory.is_dir():
             raise ConfigError(f"Ожидался каталог вывода: {directory}")
 
+    # Проверка устаревших файлов до начала любых записей.
+    # При обнаружении старых конфигураций генерация прерывается с кодом 2.
+    stale = find_stale_files(output_dir, generated)
+    if stale:
+        for path in stale:
+            LOGGER.warning("Устаревший файл, удалить вручную: %s", path.as_posix())
+        LOGGER.error(
+            "Обнаружены устаревшие конфигурационные файлы (%d). "
+            "Удалите или переместите их вручную перед запуском генерации.",
+            len(stale),
+        )
+        if not check:
+            return 2
+
     changed = 0
     for relative_path, expected in generated.items():
         destination = output_dir / relative_path
         current = read_existing(destination)
         if current == expected:
-            LOGGER.info("Без изменений: %s", relative_path)
+            LOGGER.info("Без изменений: %s", relative_path.as_posix())
             continue
         changed += 1
         if check:
-            LOGGER.warning("DRIFT: %s", relative_path)
+            LOGGER.warning("DRIFT: %s", relative_path.as_posix())
         else:
-            LOGGER.info("Обновление: %s", relative_path)
+            LOGGER.info("Обновление: %s", relative_path.as_posix())
         if diff:
             show_diff(relative_path, current, expected)
         if not check:
             write_atomically(destination, expected)
-
-    stale = find_stale_files(output_dir, generated)
-    for path in stale:
-        LOGGER.warning("Устаревший файл, удалить вручную: %s", path)
 
     if check and (changed or stale):
         LOGGER.error("Проверка не пройдена: изменений %d, старых файлов %d", changed, len(stale))
