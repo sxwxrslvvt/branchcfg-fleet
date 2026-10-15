@@ -20,7 +20,7 @@ import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateError
 
 LOGGER = logging.getLogger("branchcfg")
-IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,30}[a-z0-9]$")
 PRIVATE_RANGES = tuple(
     ipaddress.IPv4Network(cidr)
     for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
@@ -30,6 +30,32 @@ TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "templates"
 
 class ConfigError(Exception):
     """Ошибка исходного inventory или генерации."""
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    """Безопасный YAML-парсер с запретом повторяющихся ключей."""
+
+
+def construct_unique_mapping(
+    loader: UniqueKeyLoader, node: yaml.MappingNode
+) -> dict[str, Any]:
+    # safe_load по умолчанию молча оставляет последнее значение одинакового ключа.
+    # Для сетевого inventory это риск: можно незаметно перезаписать профиль или LAN.
+    loader.flatten_mapping(node)
+    result: dict[str, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if not isinstance(key, str):
+            raise ConfigError(f"YAML, строка {key_node.start_mark.line + 1}: ключ должен быть строкой")
+        if key in result:
+            raise ConfigError(f"YAML, строка {key_node.start_mark.line + 1}: повторный ключ {key!r}")
+        result[key] = loader.construct_object(value_node, deep=True)
+    return result
+
+
+UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_unique_mapping
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +88,7 @@ def require_keys(value: dict[str, Any], required: set[str], location: str) -> No
 
 def parse_identifier(value: Any, location: str) -> str:
     if not isinstance(value, str) or not IDENTIFIER_PATTERN.fullmatch(value):
-        raise ConfigError(f"{location}: разрешены a-z, 0-9, дефис; начало — буква (2–32 символа)")
+        raise ConfigError(f"{location}: 2–32 символа, a-z/0-9/дефис; начало — буква, конец — буква или цифра")
     return value
 
 
@@ -89,7 +115,7 @@ def require_list(value: Any, location: str) -> list[Any]:
 def load_inventory(path: Path) -> Inventory:
     try:
         with path.open("r", encoding="utf-8") as source:
-            document = yaml.safe_load(source)
+            document = yaml.load(source, Loader=UniqueKeyLoader)
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise ConfigError(f"Не удалось прочитать {path}: {exc}") from exc
 
@@ -252,6 +278,15 @@ def write_atomically(path: Path, content: str) -> None:
 def process(inventory_path: Path, output_dir: Path, check: bool, diff: bool = False) -> int:
     inventory = load_inventory(inventory_path)
     generated = render_files(inventory)
+
+    # Каталоги результатов не должны вести по ссылке куда-то за пределы output.
+    # Отдельные файлы проверяются перед чтением и записью.
+    for directory in (output_dir, output_dir / "hub", output_dir / "sites"):
+        if directory.is_symlink():
+            raise ConfigError(f"Каталог вывода — символьная ссылка: {directory}")
+        if directory.exists() and not directory.is_dir():
+            raise ConfigError(f"Ожидался каталог вывода: {directory}")
+
     changed = 0
     for relative_path, expected in generated.items():
         destination = output_dir / relative_path
@@ -260,7 +295,10 @@ def process(inventory_path: Path, output_dir: Path, check: bool, diff: bool = Fa
             LOGGER.info("Без изменений: %s", relative_path)
             continue
         changed += 1
-        LOGGER.warning("%s: %s", "DRIFT" if check else "Обновление", relative_path)
+        if check:
+            LOGGER.warning("DRIFT: %s", relative_path)
+        else:
+            LOGGER.info("Обновление: %s", relative_path)
         if diff:
             show_diff(relative_path, current, expected)
         if not check:

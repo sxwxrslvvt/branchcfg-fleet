@@ -1,78 +1,52 @@
 # branchcfg-fleet
 
-**Inventory-driven генератор RouterOS address-lists для распределённой сети филиалов.**
+Генератор адресных списков MikroTik RouterOS для сети филиалов. Источник данных — YAML-инвентарь; результат — готовые к проверке `.rsc` и сводный `inventory.json`.
 
-Python 3.12+ · Jinja2 · PyYAML · Docker Compose · unittest · GitHub Actions
+[![CI](https://github.com/sxwxrslvvt/branchcfg-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/sxwxrslvvt/branchcfg-fleet/actions/workflows/ci.yml)
 
-Один YAML хранит филиальные LAN и профили доступа. Генератор проверяет адресацию и формирует воспроизводимые `.rsc` для центрального маршрутизатора и филиалов, плюс JSON-инвентарь для интеграций.
+Python 3.12+ · Jinja2 · PyYAML · Docker Compose
 
-> Проект генерирует **адресные списки**, а не готовую VPN или firewall. Список сам по себе **не разрешает и не запрещает трафик**: RouterOS filter rules и маршрутизация создаются и проверяются отдельно.
+## Задача
 
-## Возможности
+При большом количестве филиалов адреса LAN и перечни доступных сервисных сетей легко расходятся между таблицей учёта и конфигурациями оборудования. Здесь они описаны в одном файле. Перед генерацией проверяются формат CIDR, пересечения LAN, имена и профили доступа.
 
-- Валидация структуры YAML, имён филиалов, IPv4 CIDR и RFC1918.
-- Выявление дублирующихся филиалов, пересечения LAN и конфликтов с целевыми сетями.
-- Профили доступа (`pos`, `office`), объединение адресов без дублей.
-- Детерминированный вывод: одинаковый inventory → одинаковые файлы.
-- `check` для CI: код возврата `2` при изменении или устаревшем `.rsc`.
-- `--diff`: unified diff, без изменения файлов в `check`.
-- Атомарная замена изменившихся файлов; старые `.rsc` не удаляются автоматически.
-- Контейнер без сети и Linux capabilities, с read-only rootfs.
+Генератор **не применяет настройки на устройствах** и не создаёт VPN, маршруты или правила firewall. Он готовит только записи `/ip firewall address-list`. Адресный список сам по себе не ограничивает доступ: его нужно использовать в правилах маршрутизатора.
 
-## Структура
+## Запуск
 
-```text
-branchcfg-fleet/
-├── main.py                     # CLI, парсер и проверки, генератор, diff
-├── config.example.yaml         # Демонстрационная топология (3 филиала)
-├── templates/
-│   ├── hub.rsc.j2              # Список LAN филиалов для хаба
-│   └── site.rsc.j2             # Разрешённые сети сервисов для филиала
-├── tests/test_main.py          # Тесты проверок, drift и детерминизма
-├── examples/generated/         # Эталонный вывод; сверяется в CI
-├── .github/workflows/ci.yml    # Проверка на Python 3.12 и 3.13
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── .dockerignore
-└── .gitignore
-```
-
-## Быстрый старт
-
-Требуются Docker Engine и Compose plugin:
+Нужны Docker Engine и Compose plugin:
 
 ```bash
 docker compose up --build
 ```
 
-Это **одноразовая задача**: контейнер генерирует файлы в `./output/` и завершает работу. Он не разворачивает демон и не подключается к маршрутизаторам.
+Конфигурации появятся в `output/`. Процесс выполнится один раз и завершится.
 
-На Linux, если UID/GID пользователя отличаются от `1000:1000`, запустите:
-
-```bash
-LOCAL_UID=$(id -u) LOCAL_GID=$(id -g) docker compose up --build
-```
-
-Проверка расхождения без перезаписи:
+Проверка расхождений с уже сформированными файлами, без перезаписи:
 
 ```bash
 docker compose run --rm branchcfg check --diff
 ```
 
-Локально, без Docker:
+Локальный запуск без Docker:
 
 ```bash
 python -m venv .venv
 # Linux/macOS: source .venv/bin/activate
 # Windows PowerShell: .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 python main.py generate --config config.example.yaml --output output
 python main.py check --config config.example.yaml --output output --diff
 python -m unittest discover -s tests -v
 ```
 
-## Входная конфигурация
+На Linux для записи в каталог текущим пользователем:
+
+```bash
+LOCAL_UID=$(id -u) LOCAL_GID=$(id -g) docker compose up --build
+```
+
+## Инвентарь
 
 ```yaml
 version: 1
@@ -91,20 +65,21 @@ sites:
     profiles: [pos, office]
 ```
 
-Скопируйте `config.example.yaml` в `config.yaml` и отредактируйте. При локальном запуске укажите `--config config.yaml`. Для Docker Compose замените путь `BRANCHCFG_CONFIG` на `/work/config.yaml` в `docker-compose.yml` (файл монтируется вместе с каталогом проекта).
+Полный пример — [`config.example.yaml`](config.example.yaml). Для собственных данных создай `config.yaml` (он добавлен в `.gitignore`). В Docker Compose поменяй `BRANCHCFG_CONFIG` на `/work/config.yaml`.
 
-- `id` и названия профилей: строчные латинские буквы, цифры и дефисы, от 2 до 32 символов; первый — буква.
-- Все сети должны быть точными IPv4 CIDR внутри RFC1918, без host-битов (`10.21.1.0/24`, не `10.21.1.4/24`).
-- LAN филиалов не могут пересекаться друг с другом или с сетями, доступ к которым задаётся через профиль.
-- Пересечение между сетями **разных профилей** допустимо: при генерации они объединяются.
-- Пустые списки и неизвестные поля считаются ошибкой.
+Правила валидации:
+
+- `id` филиала и имя профиля: 2–32 символа, строчные латинские буквы, цифры и дефис; начало — буква, конец — буква или цифра.
+- LAN и сервисные сети: точные IPv4 CIDR внутри RFC1918, без установленных host-битов.
+- LAN филиалов не пересекаются между собой. LAN филиала не должна пересекаться с сервисными сетями **назначенных ему** профилей.
+- Неизвестные поля, повторяющиеся YAML-ключи, дубли профилей и некорректные ссылки на профили отклоняются.
+- Сети разных профилей могут совпадать: при генерации дубликаты удаляются.
 
 ## Результат
 
 ```text
 output/
-├── hub/
-│   └── branch-lans.rsc
+├── hub/branch-lans.rsc
 ├── sites/
 │   ├── branch-001.rsc
 │   ├── branch-002.rsc
@@ -112,79 +87,84 @@ output/
 └── inventory.json
 ```
 
-В `hub/branch-lans.rsc`:
+Фрагмент списка сетей филиалов на центральном маршрутизаторе:
 
 ```routeros
 /ip firewall address-list
 add list=branchcfg_lans address=10.21.1.0/24 comment="branchcfg:branch-001"
 ```
 
-В `sites/branch-001.rsc`:
+Фрагмент списка сетей сервисов для филиала:
 
 ```routeros
 /ip firewall address-list
 add list=branchcfg_allowed address=10.200.10.0/24 comment="branchcfg:branch-001"
-add list=branchcfg_allowed address=10.200.20.10/32 comment="branchcfg:branch-001"
 ```
 
-Сгенерированные скрипты **additive-only**: команда `add` добавляет записи; повторный импорт может создать дубликаты, удалённые из YAML сети останутся в RouterOS. Это намеренное ограничение: генератор не удаляет настройки удалённого маршрутизатора без контроля оператора. При изменениях сравнивайте списки и удаляйте старые записи вручную.
-
-**Не импортируйте на рабочий маршрутизатор без ревью.** Для проверки используйте отдельное тестовое устройство/CHR. Требуются отдельные правила firewall, маршруты и проверка того, что объекты списков используются в нужных цепочках.
-
-## CLI и коды возврата
+Содержимое `examples/generated/` — эталон вывода для тестового инвентаря. CI сверяет его с текущими шаблонами. Если меняются шаблоны или `config.example.yaml`, пересоздай эталон:
 
 ```bash
-python main.py generate --config config.yaml --output output
+python main.py generate --output examples/generated
+```
+
+## Проверка изменений
+
+```bash
 python main.py check --config config.yaml --output output --diff
 ```
 
-| Код | Значение |
+| Код выхода | Значение |
 | --- | --- |
-| `0` | Успех, либо `check` не нашёл расхождений |
-| `1` | Ошибка входных данных, чтения, записи или шаблона |
-| `2` | `check`: файлы отсутствуют/отличаются или есть старые `.rsc` |
+| `0` | Успешная генерация или совпадение результатов в режиме `check` |
+| `1` | Некорректные данные, ошибка шаблона или операция с файлами |
+| `2` | `check` обнаружил отсутствующий, изменённый или устаревший файл |
 
-Устаревшие файлы в `output/hub/` и `output/sites/` обнаруживаются, но не удаляются. Файлы в других папках не контролируются. Один файл заменяется атомарно, но **нет атомарной транзакции для всех файлов сразу**.
+Одинаковый инвентарь даёт одинаковый результат. При генерации изменённые файлы заменяются атомарно, по одному. Лишние `.rsc` в `output/hub/` и `output/sites/` обнаруживаются, но не удаляются.
 
 ## Переменные окружения
 
-| Имя | По умолчанию | Для чего |
+| Переменная | Значение по умолчанию | Назначение |
 | --- | --- | --- |
-| `BRANCHCFG_CONFIG` | `config.example.yaml` | YAML inventory |
-| `BRANCHCFG_OUTPUT` | `output` | Каталог результатов |
-| `BRANCHCFG_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `LOCAL_UID`, `LOCAL_GID` | `1000`, `1000` | Пользователь процесса в Compose (Linux bind mount) |
+| `BRANCHCFG_CONFIG` | `config.example.yaml` | Путь к инвентарю |
+| `BRANCHCFG_OUTPUT` | `output` | Каталог результата |
+| `BRANCHCFG_LOG_LEVEL` | `INFO` | Уровень логирования |
+| `LOCAL_UID`, `LOCAL_GID` | `1000` | UID/GID контейнера при запуске через Compose |
 
-Аргументы `--config`, `--output`, `--log-level` имеют приоритет над окружением. Секреты и WireGuard private keys в inventory **не нужны**; не добавляйте конфигурации реальных сетей с внутренними данными в публичный GitHub.
+CLI-параметры `--config`, `--output` и `--log-level` переопределяют переменные окружения.
 
-## Архитектура и ограничения
+## Устройство проекта
 
 ```text
-config.yaml
-   │
-   ▼
-PyYAML safe_load → типы/поля → ipaddress/проверка пересечений
-   │
-   ▼
-Jinja2 StrictUndefined → сортировка/дедупликация
-   │
-   ├── hub/*.rsc
-   ├── sites/*.rsc
-   └── inventory.json
-   │
-   ▼
-check/diff или атомарная запись
+config.example.yaml
+       │
+       ▼
+  PyYAML + ipaddress ── проверка входных данных
+       │
+       ▼
+  Jinja2 / StrictUndefined
+       │
+       ├── hub/*.rsc
+       ├── sites/*.rsc
+       └── inventory.json
+       │
+       ▼
+  generate / check --diff
 ```
 
-Список филиальных сетей на хабе и списки разрешённых сетей на филиалах генерируются офлайн. Управление доступом зависит от отдельно настроенного сетевого оборудования. Модель рассчитана на IPv4 и плоскую адресацию без VRF/NAT-overlap; для иных топологий нужна отдельная схема inventory.
+- `main.py` — парсинг и валидация, генерация, сравнение и запись файлов.
+- `templates/` — шаблоны RouterOS.
+- `tests/` — тесты входных данных, предсказуемости вывода и обнаружения расхождений.
+- `.github/workflows/ci.yml` — тесты на Python 3.12 и 3.13, сверка эталона и сборка Docker.
 
-В `examples/generated/` сохранён эталонный вывод для демонстрационного inventory. CI проверяет, что он соответствует `config.example.yaml`. После изменения примера обновите его командой `python main.py generate --output examples/generated` и включите обновлённые файлы в тот же PR.
+### Ограничения
 
-Рекомендованный процесс для команды: **изменение YAML → генерация → PR → CI → просмотр diff → ручной импорт в тест → согласованное внедрение**.
+- Импорт `.rsc` **не идемпотентен**: повторный `add` может создать повторяющиеся записи. Записи, удалённые из YAML, не удаляются с маршрутизатора. Перед импортом сравни состояние устройства с ожидаемым и проверь скрипт на тестовой RouterOS/CHR.
+- Это генератор адресных списков, а не система доставки конфигураций. Подключение к устройствам, rollback, маршрутизация и firewall-правила находятся вне проекта.
+- Поддерживаются только IPv4 и сети без наложения филиальных LAN. Конфигурации VRF, NAT-overlap и IPv6 не моделируются.
+- Атомарная запись выполняется отдельно для каждого файла; общей транзакции на весь каталог нет.
 
-## Документация
+## Справочные материалы
 
-- [RouterOS address-lists](https://help.mikrotik.com/docs/spaces/ROS/pages/130220135/Address-lists)
-- [Jinja2 API и StrictUndefined](https://jinja.palletsprojects.com/en/stable/api/)
-- [Python ipaddress](https://docs.python.org/3/library/ipaddress.html)
-- [Docker Compose build](https://docs.docker.com/reference/compose-file/build/)
+- [MikroTik: Address-lists](https://help.mikrotik.com/docs/spaces/ROS/pages/130220135/Address-lists)
+- [Python: ipaddress](https://docs.python.org/3/library/ipaddress.html)
+- [Jinja: StrictUndefined](https://jinja.palletsprojects.com/en/stable/api/)
