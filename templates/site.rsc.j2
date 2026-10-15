@@ -1,0 +1,7 @@
+# branchcfg: сети сервисов, доступные филиалу {{ site_id }}
+# Это только address-list. Правила firewall и маршруты настраиваются отдельно.
+# Импорт повторно может создать дубликаты; предварительно сверьте состояние.
+/ip firewall address-list
+{% for network in allowed_networks %}
+add list=branchcfg_allowed address={{ network }} comment="branchcfg:{{ site_id }}"
+{% endfor %}

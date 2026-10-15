@@ -1,0 +1,7 @@
+# branchcfg: филиальные LAN для центрального RouterOS
+# Список branchcfg_lans предназначен только для записей этого генератора.
+# Скрипт не удаляет старые записи: сверяйте изменения до импорта.
+/ip firewall address-list
+{% for site in sites %}
+add list=branchcfg_lans address={{ site.lan }} comment="branchcfg:{{ site.id }}"
+{% endfor %}
